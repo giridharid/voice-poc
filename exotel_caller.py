@@ -19,7 +19,7 @@ from collections import defaultdict
 
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, JSONResponse
 from pydantic import BaseModel
 import uvicorn
 
@@ -229,13 +229,15 @@ async def make_exotel_call(to_number: str, language: str = "hi-IN") -> dict:
     }
     
     api_url = f"https://{CONFIG['EXOTEL_SUBDOMAIN']}/v1/Accounts/{CONFIG['EXOTEL_ACCOUNT_SID']}/Calls/connect.json"
-    callback_url = f"{APP_BASE_URL}/exotel/callback/{call_id}"
     status_url = f"{APP_BASE_URL}/exotel/status/{call_id}"
+    
+    # Use Exotel internal flow URL - Connect applet will call our server
+    flow_url = "http://my.exotel.com/enixta1/exoml/start_voice/1222663"
     
     print(f"=== INITIATING CALL ===")
     print(f"To Number (10 digit): {to_number}")
     print(f"Caller ID: {caller_id}")
-    print(f"Callback URL: {callback_url}")
+    print(f"Flow URL: {flow_url}")
     print(f"Status URL: {status_url}")
     print(f"API URL: {api_url}")
     
@@ -246,7 +248,7 @@ async def make_exotel_call(to_number: str, language: str = "hi-IN") -> dict:
             data={
                 "From": to_number,
                 "CallerId": caller_id,
-                "Url": callback_url,
+                "Url": flow_url,
                 "CallType": "trans",
                 "StatusCallback": status_url,
             },
@@ -375,6 +377,108 @@ async def exotel_status_callback(call_id: str, request: Request):
     print(f"CallSid: {all_params.get('CallSid', 'unknown')}")
     
     return Response(content="OK", media_type="text/plain")
+
+@app.api_route("/exotel/greeting", methods=["GET", "POST", "HEAD"])
+async def exotel_dynamic_greeting(request: Request):
+    """
+    Return dynamic audio URL for Greeting applet.
+    Returns plain text (audio URL) that Exotel will play.
+    """
+    # Handle HEAD request
+    if request.method == "HEAD":
+        return Response(content="", media_type="text/plain")
+    
+    all_params = dict(request.query_params)
+    
+    if request.method == "POST":
+        try:
+            form = await request.form()
+            all_params.update(dict(form))
+        except:
+            pass
+    
+    print(f"=== DYNAMIC GREETING ===")
+    print(f"Method: {request.method}")
+    print(f"All Params: {all_params}")
+    
+    call_sid = all_params.get("CallSid", "")
+    caller_from = all_params.get("From", "")
+    
+    print(f"CallSid: {call_sid}")
+    print(f"From: {caller_from}")
+    
+    # Find the language from our active calls
+    lang = "hi-IN"  # default
+    for cid, call in active_calls.items():
+        call_phone = call.get("to_number", "")[-10:]
+        from_phone = caller_from.replace("+91", "").replace("+", "")[-10:]
+        if call_phone == from_phone:
+            lang = call.get("language", "hi-IN")
+            print(f"Found call {cid}, language: {lang}")
+            break
+    
+    audio_url = f"{APP_BASE_URL}/audio/{lang}/01_greeting.wav"
+    print(f"Returning audio URL: {audio_url}")
+    
+    # Return plain audio URL
+    return Response(content=audio_url, media_type="text/plain")
+
+@app.api_route("/exotel/connect-playback", methods=["GET", "HEAD"])
+async def exotel_connect_playback(request: Request):
+    """
+    Dynamic playback for Connect applet.
+    Returns JSON with audio URL based on caller's language preference.
+    """
+    # Handle HEAD request (required by Exotel)
+    if request.method == "HEAD":
+        return Response(
+            content="",
+            media_type="application/json",
+            headers={"Content-Type": "application/json"}
+        )
+    
+    all_params = dict(request.query_params)
+    
+    print(f"=== CONNECT PLAYBACK ===")
+    print(f"Method: {request.method}")
+    print(f"All Params: {all_params}")
+    
+    call_sid = all_params.get("CallSid", "")
+    caller_from = all_params.get("From", "")
+    caller_to = all_params.get("To", "")
+    dial_whom = all_params.get("DialWhomNumber", "")
+    
+    print(f"CallSid: {call_sid}")
+    print(f"From: {caller_from}")
+    print(f"To: {caller_to}")
+    print(f"DialWhomNumber: {dial_whom}")
+    
+    # Find the language from our active calls based on phone number
+    lang = "hi-IN"  # default
+    for cid, call in active_calls.items():
+        call_phone = call.get("to_number", "")[-10:]
+        # Match against From or DialWhomNumber
+        from_phone = caller_from.replace("+91", "").replace("+", "")[-10:]
+        dial_phone = dial_whom.replace("+91", "").replace("+", "")[-10:] if dial_whom else ""
+        
+        if call_phone == from_phone or call_phone == dial_phone:
+            lang = call.get("language", "hi-IN")
+            print(f"Found call {cid}, language: {lang}")
+            break
+    
+    audio_url = f"{APP_BASE_URL}/audio/{lang}/01_greeting.wav"
+    print(f"Returning audio URL: {audio_url}")
+    
+    # Return JSON response as per Exotel spec
+    response_data = {
+        "start_call_playback": {
+            "playback_to": "callee",
+            "type": "audio_url",
+            "value": audio_url
+        }
+    }
+    
+    return JSONResponse(content=response_data, media_type="application/json")
 
 @app.api_route("/exotel/callback/", methods=["GET", "POST"])
 async def exotel_passthru_callback(request: Request):

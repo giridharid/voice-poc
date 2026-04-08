@@ -231,7 +231,12 @@ async def make_exotel_call(to_number: str, language: str = "hi-IN") -> dict:
     
     url = f"https://{CONFIG['EXOTEL_SUBDOMAIN']}/v1/Accounts/{CONFIG['EXOTEL_ACCOUNT_SID']}/Calls/connect.json"
     
-    # Don't pass Url - let the Flow assigned to ExoPhone handle callback via Passthru
+    print(f"=== INITIATING CALL ===")
+    print(f"To Number: {to_number}")
+    print(f"Caller ID: {caller_id}")
+    print(f"Using App ID: 1222663 (voice.flow Passthru)")
+    print(f"API URL: {url}")
+    
     async with httpx.AsyncClient() as client:
         response = await client.post(
             url,
@@ -239,17 +244,19 @@ async def make_exotel_call(to_number: str, language: str = "hi-IN") -> dict:
             data={
                 "From": to_number,
                 "CallerId": caller_id,
+                "App": "1222663",
                 "CallType": "trans",
             },
             timeout=30.0
         )
         
-        print(f"Exotel API Response: {response.status_code} - {response.text[:500]}")
+        print(f"Exotel API Response: {response.status_code}")
+        print(f"Exotel Response Body: {response.text[:1000]}")
         
         if response.status_code in [200, 201]:
             result = response.json()
             active_calls[call_id]["exotel_sid"] = result.get("Call", {}).get("Sid")
-            print(f"Call initiated: {call_id}, Exotel SID: {active_calls[call_id]['exotel_sid']}")
+            print(f"Call initiated successfully: {call_id}, Exotel SID: {active_calls[call_id]['exotel_sid']}")
             return {"success": True, "call_id": call_id}
         else:
             del active_calls[call_id]
@@ -417,18 +424,25 @@ async def exotel_passthru_callback(request: Request):
     return Response(content=exoml, media_type="application/xml")
 
 
-@app.post("/exotel/callback/{call_id}")
-async def exotel_callback(call_id: str):
+@app.api_route("/exotel/callback/{call_id}", methods=["GET", "POST"])
+async def exotel_callback(call_id: str, request: Request):
+    print(f"=== Per-call callback for {call_id} ===")
+    print(f"Method: {request.method}")
+    print(f"Query params: {dict(request.query_params)}")
+    
     if call_id not in active_calls:
+        print(f"Call ID {call_id} not found in active_calls")
         return Response(content="<Response><Hangup/></Response>", media_type="application/xml")
     
     call = active_calls[call_id]
     lang = call.get("language", "hi-IN")
     
+    print(f"Found call, language={lang}")
     await add_transcript(call_id, "Agent", f"Greeting - {RO_NAMES.get(lang, 'RO')} tomorrow")
     
     exoml = generate_exoml_play_gather(f"{lang}/01_greeting.wav", call_id, "availability")
     call["state"] = CallState.WAIT_AVAILABILITY
+    print(f"Returning ExoML greeting")
     return Response(content=exoml, media_type="application/xml")
 
 @app.api_route("/exotel/availability/{call_id}", methods=["GET", "POST"])

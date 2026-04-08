@@ -381,8 +381,8 @@ async def exotel_status_callback(call_id: str, request: Request):
 @app.api_route("/exotel/greeting", methods=["GET", "POST", "HEAD"])
 async def exotel_dynamic_greeting(request: Request):
     """
-    Return dynamic audio URL for Greeting applet.
-    Returns plain text (audio URL) that Exotel will play.
+    Return dynamic text for Greeting applet TTS.
+    Exotel will convert text to speech.
     """
     # Handle HEAD request
     if request.method == "HEAD":
@@ -417,11 +417,21 @@ async def exotel_dynamic_greeting(request: Request):
             print(f"Found call {cid}, language: {lang}")
             break
     
-    audio_url = f"{APP_BASE_URL}/audio/{lang}/01_greeting.wav"
-    print(f"Returning audio URL: {audio_url}")
+    # TTS text by language
+    greetings = {
+        "hi-IN": "नमस्ते, यह फ्यूजन फाइनेंस से एक महत्वपूर्ण कॉल है। कल आपकी EMI जमा करने की तारीख है। कृपया पुष्टि करने के लिए एक दबाएं, या पुनर्निर्धारित करने के लिए दो दबाएं।",
+        "ta-IN": "வணக்கம், இது ஃபியூஷன் ஃபைனான்ஸிலிருந்து ஒரு முக்கியமான அழைப்பு. நாளை உங்கள் EMI செலுத்த வேண்டிய தேதி. உறுதிப்படுத்த ஒன்றை அழுத்தவும், அல்லது மறுதிட்டமிட இரண்டை அழுத்தவும்.",
+        "te-IN": "నమస్కారం, ఇది ఫ్యూజన్ ఫైనాన్స్ నుండి ఒక ముఖ్యమైన కాల్. రేపు మీ EMI చెల్లింపు తేదీ. నిర్ధారించడానికి ఒకటి నొక్కండి, లేదా పునర్నిర్ణయించడానికి రెండు నొక్కండి.",
+        "kn-IN": "ನಮಸ್ಕಾರ, ಇದು ಫ್ಯೂಷನ್ ಫೈನಾನ್ಸ್‌ನಿಂದ ಪ್ರಮುಖ ಕರೆ. ನಾಳೆ ನಿಮ್ಮ EMI ಪಾವತಿ ದಿನಾಂಕ. ದೃಢೀಕರಿಸಲು ಒಂದು ಒತ್ತಿ, ಅಥವಾ ಮರುನಿಗದಿಪಡಿಸಲು ಎರಡು ಒತ್ತಿ.",
+        "mr-IN": "नमस्कार, हा फ्यूजन फायनान्सकडून एक महत्त्वाचा कॉल आहे. उद्या तुमची EMI भरण्याची तारीख आहे. पुष्टी करण्यासाठी एक दाबा, किंवा पुन्हा शेड्यूल करण्यासाठी दोन दाबा.",
+        "en-IN": "Hello, this is an important call from Fusion Finance. Tomorrow is your EMI payment date. Press one to confirm, or press two to reschedule."
+    }
     
-    # Return plain audio URL
-    return Response(content=audio_url, media_type="text/plain")
+    text = greetings.get(lang, greetings["en-IN"])
+    print(f"Returning TTS text for {lang}: {text[:50]}...")
+    
+    # Return plain text for TTS
+    return Response(content=text, media_type="text/plain")
 
 @app.api_route("/exotel/connect-playback", methods=["GET", "HEAD"])
 async def exotel_connect_playback(request: Request):

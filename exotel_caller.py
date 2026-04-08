@@ -259,10 +259,10 @@ def generate_exoml_play_gather(audio_file: str, call_id: str, next_action: str, 
     
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Gather action="{action_url}" method="POST" numDigits="{digits}" timeout="10">
+    <Gather action="{action_url}" method="GET" numDigits="{digits}" timeout="10">
         <Play>{audio_url}</Play>
     </Gather>
-    <Redirect method="POST">{APP_BASE_URL}/exotel/no_input/{call_id}</Redirect>
+    <Redirect method="GET">{APP_BASE_URL}/exotel/no_input/{call_id}</Redirect>
 </Response>"""
 
 def generate_exoml_play_hangup(audio_file: str) -> str:
@@ -326,12 +326,25 @@ async def serve_logo():
 # Store mapping of Exotel CallSid to our call_id
 exotel_to_local: Dict[str, str] = {}
 
-@app.post("/exotel/callback/")
+@app.api_route("/exotel/callback/", methods=["GET", "POST"])
 async def exotel_passthru_callback(request: Request):
-    """Handle Passthru callback from Exotel flow - finds call by CallSid"""
-    form = await request.form()
-    exotel_sid = form.get("CallSid", "")
-    caller = form.get("From", "")
+    """Handle Passthru callback from Exotel flow - Exotel sends GET with query params"""
+    
+    # Exotel sends GET with query parameters
+    exotel_sid = request.query_params.get("CallSid", "")
+    caller = request.query_params.get("From", "")
+    
+    # If POST, also check form data
+    if request.method == "POST":
+        form = await request.form()
+        exotel_sid = exotel_sid or form.get("CallSid", "")
+        caller = caller or form.get("From", "")
+    
+    print(f"=== Exotel Callback ===")
+    print(f"Method: {request.method}")
+    print(f"CallSid: {exotel_sid}")
+    print(f"From: {caller}")
+    print(f"All params: {dict(request.query_params)}")
     
     # Find our call_id by matching the phone number
     call_id = None
@@ -339,14 +352,25 @@ async def exotel_passthru_callback(request: Request):
         # Match by phone number (last 10 digits)
         call_phone = call.get("to_number", "").replace("+91", "").replace("+", "")[-10:]
         caller_phone = caller.replace("+91", "").replace("+", "")[-10:]
+        print(f"Comparing: call_phone={call_phone}, caller_phone={caller_phone}, state={call.get('state')}")
         if call_phone == caller_phone and call.get("state") == CallState.GREETING:
             call_id = cid
             exotel_to_local[exotel_sid] = call_id
+            print(f"Match found: {call_id}")
             break
     
     if not call_id:
-        # No matching call found, just play default Hindi greeting
-        return Response(content=generate_exoml_play_hangup("hi-IN/01_greeting.wav"), media_type="application/xml")
+        # No matching call found, just play default Hindi greeting with gather
+        print("No matching call found, playing default greeting with gather")
+        exoml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Gather action="{APP_BASE_URL}/exotel/availability/default" method="GET" numDigits="1" timeout="10">
+        <Play>{APP_BASE_URL}/audio/hi-IN/01_greeting.wav</Play>
+    </Gather>
+    <Play>{APP_BASE_URL}/audio/hi-IN/05_unclear.wav</Play>
+    <Hangup/>
+</Response>"""
+        return Response(content=exoml, media_type="application/xml")
     
     call = active_calls[call_id]
     lang = call.get("language", "hi-IN")
@@ -355,6 +379,7 @@ async def exotel_passthru_callback(request: Request):
     
     exoml = generate_exoml_play_gather(f"{lang}/01_greeting.wav", call_id, "availability")
     call["state"] = CallState.WAIT_AVAILABILITY
+    print(f"Returning ExoML for {call_id}, lang={lang}")
     return Response(content=exoml, media_type="application/xml")
 
 
@@ -372,13 +397,31 @@ async def exotel_callback(call_id: str):
     call["state"] = CallState.WAIT_AVAILABILITY
     return Response(content=exoml, media_type="application/xml")
 
-@app.post("/exotel/availability/{call_id}")
+@app.api_route("/exotel/availability/{call_id}", methods=["GET", "POST"])
 async def handle_availability(call_id: str, request: Request):
-    if call_id not in active_calls:
+    print(f"=== Availability callback for {call_id} ===")
+    
+    if call_id not in active_calls and call_id != "default":
         return Response(content="<Response><Hangup/></Response>", media_type="application/xml")
     
-    form = await request.form()
-    digits = form.get("digits", "")
+    # Get digits from query params (GET) or form (POST)
+    digits = request.query_params.get("digits", "")
+    if request.method == "POST":
+        form = await request.form()
+        digits = digits or form.get("digits", "")
+    
+    print(f"Digits received: {digits}")
+    
+    # Handle default case
+    if call_id == "default":
+        lang = "hi-IN"
+        if digits == "1":
+            return Response(content=generate_exoml_play_hangup(f"{lang}/02_confirmed.wav"), media_type="application/xml")
+        elif digits == "2":
+            return Response(content=generate_exoml_play_gather(f"{lang}/03_ask_reason.wav", "default", "reason"), media_type="application/xml")
+        else:
+            return Response(content=generate_exoml_play_gather(f"{lang}/05_unclear.wav", "default", "availability"), media_type="application/xml")
+    
     call = active_calls[call_id]
     lang = call.get("language", "hi-IN")
     
@@ -399,13 +442,23 @@ async def handle_availability(call_id: str, request: Request):
         await add_transcript(call_id, "Agent", "Unclear - repeating")
         return Response(content=generate_exoml_play_gather(f"{lang}/05_unclear.wav", call_id, "availability"), media_type="application/xml")
 
-@app.post("/exotel/reason/{call_id}")
+@app.api_route("/exotel/reason/{call_id}", methods=["GET", "POST"])
 async def handle_reason(call_id: str, request: Request):
-    if call_id not in active_calls:
+    print(f"=== Reason callback for {call_id} ===")
+    
+    if call_id not in active_calls and call_id != "default":
         return Response(content="<Response><Hangup/></Response>", media_type="application/xml")
     
-    form = await request.form()
-    digits = form.get("digits", "")
+    # Get digits from query params (GET) or form (POST)
+    digits = request.query_params.get("digits", "")
+    if request.method == "POST":
+        form = await request.form()
+        digits = digits or form.get("digits", "")
+    
+    # Handle default case
+    if call_id == "default":
+        return Response(content=generate_exoml_play_hangup("hi-IN/04_reschedule_confirm.wav"), media_type="application/xml")
+    
     call = active_calls[call_id]
     lang = call.get("language", "hi-IN")
     
@@ -420,10 +473,15 @@ async def handle_reason(call_id: str, request: Request):
     
     return Response(content=generate_exoml_play_hangup(f"{lang}/04_reschedule_confirm.wav"), media_type="application/xml")
 
-@app.post("/exotel/no_input/{call_id}")
+@app.api_route("/exotel/no_input/{call_id}", methods=["GET", "POST"])
 async def handle_no_input(call_id: str):
-    if call_id not in active_calls:
+    print(f"=== No input callback for {call_id} ===")
+    
+    if call_id not in active_calls and call_id != "default":
         return Response(content="<Response><Hangup/></Response>", media_type="application/xml")
+    
+    if call_id == "default":
+        return Response(content=generate_exoml_play_gather("hi-IN/05_unclear.wav", "default", "availability"), media_type="application/xml")
     
     call = active_calls[call_id]
     lang = call.get("language", "hi-IN")
@@ -481,6 +539,7 @@ async def index():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smaartbrand Voice | Fusion Finance</title>
+    <link rel="icon" type="image/png" href="/logo.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
@@ -542,7 +601,7 @@ async def index():
                 </div>
                 
                 <!-- SmaartAnalyst button -->
-                <button class="flex items-center gap-2 glass px-4 py-2 rounded-lg text-sm hover:bg-white/5">
+                <button onclick="toggleChat()" class="flex items-center gap-2 glass px-4 py-2 rounded-lg text-sm hover:bg-white/5">
                     <span>💬</span>
                     <span>SmaartAnalyst</span>
                 </button>
@@ -704,6 +763,46 @@ async def index():
             </div>
         </div>
     </main>
+    
+    <!-- SmaartAnalyst Chat Panel -->
+    <div id="chatPanel" class="fixed right-0 top-0 h-full w-[420px] glass-dark z-50 flex flex-col transform translate-x-full transition-transform duration-300">
+        <div class="flex items-center justify-between p-4 border-b border-white/10">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-lg gradient-purple flex items-center justify-center">🤖</div>
+                <div>
+                    <h3 class="font-semibold text-sm">SmaartAnalyst</h3>
+                    <p class="text-xs text-gray-400">Voice Intelligence AI</p>
+                </div>
+            </div>
+            <button onclick="toggleChat()" class="p-2 hover:bg-white/10 rounded-lg">✕</button>
+        </div>
+        
+        <div id="chatMessages" class="flex-1 overflow-y-auto p-4 space-y-4">
+            <div class="flex gap-3">
+                <div class="w-8 h-8 rounded-lg gradient-purple flex items-center justify-center flex-shrink-0 text-sm">🤖</div>
+                <div class="glass rounded-xl p-3 max-w-[85%]">
+                    <p class="text-sm">Hello! I'm SmaartAnalyst. Ask me about call patterns, decline reasons, or cluster risks. Try:</p>
+                    <ul class="text-sm text-gray-400 mt-2 space-y-1">
+                        <li>• Which cluster has highest risk?</li>
+                        <li>• Top decline reasons this week?</li>
+                        <li>• Who are frequent decliners?</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        
+        <div class="p-3 border-t border-white/10">
+            <div class="flex gap-2 flex-wrap mb-3">
+                <button class="glass text-xs px-3 py-1.5 rounded-full hover:bg-white/10" onclick="askChat('Which cluster has highest risk?')">🔥 Risky clusters</button>
+                <button class="glass text-xs px-3 py-1.5 rounded-full hover:bg-white/10" onclick="askChat('Top decline reasons?')">📊 Decline reasons</button>
+                <button class="glass text-xs px-3 py-1.5 rounded-full hover:bg-white/10" onclick="askChat('Who are frequent decliners?')">🚨 Frequent decliners</button>
+            </div>
+            <div class="flex gap-2">
+                <input type="text" id="chatInput" placeholder="Ask about call intelligence..." class="flex-1 glass-dark rounded-lg px-4 py-2 text-sm focus:outline-none" onkeypress="if(event.key==='Enter')askChat()">
+                <button onclick="askChat()" class="gradient-orange px-4 py-2 rounded-lg text-sm font-medium">Send</button>
+            </div>
+        </div>
+    </div>
     
     <!-- Footer - Matching Smaartbrand Moto -->
     <footer class="mt-auto px-6 py-4 border-t border-white/10">
@@ -930,6 +1029,80 @@ async def index():
                     <div class="text-xl font-bold text-orange-400">${Math.round(v/totalP*100)}%</div>
                 </div>
             `).join('');
+        }
+        
+        // Chat toggle
+        function toggleChat() {
+            const panel = document.getElementById('chatPanel');
+            panel.classList.toggle('translate-x-full');
+        }
+        
+        // Chat response (mock AI)
+        function askChat(question) {
+            const input = document.getElementById('chatInput');
+            const q = question || input.value.trim();
+            if (!q) return;
+            input.value = '';
+            
+            const box = document.getElementById('chatMessages');
+            
+            // Add user message
+            box.innerHTML += `
+                <div class="flex gap-3 justify-end">
+                    <div class="glass rounded-xl p-3 max-w-[85%] bg-orange-500/20">
+                        <p class="text-sm">${q}</p>
+                    </div>
+                </div>
+            `;
+            
+            // Generate response based on question
+            let response = '';
+            const ql = q.toLowerCase();
+            
+            if (!intelData) {
+                response = 'Loading intelligence data... Please try again.';
+            } else if (ql.includes('cluster') || ql.includes('risk')) {
+                const highRisk = Object.entries(intelData.clusters).filter(([k,v]) => v.alert === 'HIGH');
+                if (highRisk.length > 0) {
+                    response = `<strong>High Risk Clusters:</strong><br>` + highRisk.map(([name, c]) => 
+                        `• <strong>${name}</strong> (${c.state}): Risk ${c.avg_risk}, ${c.financial_stress} with financial stress`
+                    ).join('<br>') + `<br><br>Recommend immediate RO intervention in these areas.`;
+                } else {
+                    response = 'No high-risk clusters currently. All clusters within normal parameters.';
+                }
+            } else if (ql.includes('decline') || ql.includes('reason')) {
+                const reasons = Object.entries(intelData.decline_reasons).sort((a,b) => b[1] - a[1]).slice(0, 4);
+                response = `<strong>Top Decline Reasons:</strong><br>` + reasons.map(([r, count]) => 
+                    `• ${r.replace(/_/g, ' ')}: ${count} calls`
+                ).join('<br>') + `<br><br>Financial stress is the leading indicator — correlates with NPA risk.`;
+            } else if (ql.includes('frequent') || ql.includes('decliner')) {
+                const top = intelData.frequent_decliners.slice(0, 5);
+                response = `<strong>Top Frequent Decliners:</strong><br>` + top.map(b => 
+                    `• ${b.id} (${b.cluster}): ${b.decline_count} declines, Risk ${b.risk_score}`
+                ).join('<br>') + `<br><br>These borrowers need personalized outreach — high NPA probability.`;
+            } else if (ql.includes('npa') || ql.includes('predict')) {
+                response = `<strong>NPA Prediction (60 days):</strong><br>• Current: ${intelData.npa.current}%<br>• Predicted: ${intelData.npa.predicted}%<br>• At-Risk: ₹${intelData.npa.at_risk}<br>• Saveable with intervention: ₹${intelData.npa.savings}<br><br>Early intervention on frequent decliners can save ₹1.8 Cr.`;
+            } else if (ql.includes('ro') || ql.includes('centre') || ql.includes('center') || ql.includes('affected')) {
+                const worst = Object.entries(intelData.clusters).sort((a,b) => b[1].avg_risk - a[1].avg_risk)[0];
+                response = `<strong>Most Affected Centre:</strong><br>• <strong>${worst[0]}</strong> (${worst[1].state})<br>• Average Risk: ${worst[1].avg_risk}<br>• Frequent Decliners: ${worst[1].frequent}<br>• Financial Stress Cases: ${worst[1].financial_stress}<br><br>RO in this area needs immediate support and portfolio review.`;
+            } else {
+                response = `I can help you with:<br>• Cluster risk analysis<br>• Decline reason patterns<br>• Frequent decliner identification<br>• NPA predictions<br>• Centre/RO performance<br><br>Try asking: "Which centre is most affected?"`;
+            }
+            
+            // Add AI response
+            setTimeout(() => {
+                box.innerHTML += `
+                    <div class="flex gap-3">
+                        <div class="w-8 h-8 rounded-lg gradient-purple flex items-center justify-center flex-shrink-0 text-sm">🤖</div>
+                        <div class="glass rounded-xl p-3 max-w-[85%]">
+                            <p class="text-sm">${response}</p>
+                        </div>
+                    </div>
+                `;
+                box.scrollTop = box.scrollHeight;
+            }, 500);
+            
+            box.scrollTop = box.scrollHeight;
         }
         
         connectWS();

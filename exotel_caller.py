@@ -230,11 +230,13 @@ async def make_exotel_call(to_number: str, language: str = "hi-IN") -> dict:
     
     api_url = f"https://{CONFIG['EXOTEL_SUBDOMAIN']}/v1/Accounts/{CONFIG['EXOTEL_ACCOUNT_SID']}/Calls/connect.json"
     callback_url = f"{APP_BASE_URL}/exotel/callback/{call_id}"
+    status_url = f"{APP_BASE_URL}/exotel/status/{call_id}"
     
     print(f"=== INITIATING CALL ===")
     print(f"To Number (10 digit): {to_number}")
     print(f"Caller ID: {caller_id}")
     print(f"Callback URL: {callback_url}")
+    print(f"Status URL: {status_url}")
     print(f"API URL: {api_url}")
     
     async with httpx.AsyncClient() as client:
@@ -246,6 +248,7 @@ async def make_exotel_call(to_number: str, language: str = "hi-IN") -> dict:
                 "CallerId": caller_id,
                 "Url": callback_url,
                 "CallType": "trans",
+                "StatusCallback": status_url,
             },
             timeout=30.0
         )
@@ -334,6 +337,26 @@ async def serve_logo():
 
 # Store mapping of Exotel CallSid to our call_id
 exotel_to_local: Dict[str, str] = {}
+
+@app.api_route("/exotel/status/{call_id}", methods=["GET", "POST"])
+async def exotel_status_callback(call_id: str, request: Request):
+    """Log call status updates from Exotel"""
+    all_params = dict(request.query_params)
+    
+    if request.method == "POST":
+        try:
+            form = await request.form()
+            all_params.update(dict(form))
+        except:
+            pass
+    
+    print(f"=== STATUS CALLBACK for {call_id} ===")
+    print(f"Method: {request.method}")
+    print(f"All Params: {all_params}")
+    print(f"Status: {all_params.get('Status', 'unknown')}")
+    print(f"CallSid: {all_params.get('CallSid', 'unknown')}")
+    
+    return Response(content="OK", media_type="text/plain")
 
 @app.api_route("/exotel/callback/", methods=["GET", "POST"])
 async def exotel_passthru_callback(request: Request):

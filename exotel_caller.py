@@ -316,6 +316,48 @@ async def serve_audio(language: str, filename: str):
         raise HTTPException(status_code=404, detail="Audio not found")
     return Response(content=audio_path.read_bytes(), media_type="audio/wav")
 
+@app.get("/logo.png")
+async def serve_logo():
+    logo_path = Path(__file__).parent / "logo.png"
+    if not logo_path.exists():
+        raise HTTPException(status_code=404, detail="Logo not found")
+    return Response(content=logo_path.read_bytes(), media_type="image/png")
+
+# Store mapping of Exotel CallSid to our call_id
+exotel_to_local: Dict[str, str] = {}
+
+@app.post("/exotel/callback/")
+async def exotel_passthru_callback(request: Request):
+    """Handle Passthru callback from Exotel flow - finds call by CallSid"""
+    form = await request.form()
+    exotel_sid = form.get("CallSid", "")
+    caller = form.get("From", "")
+    
+    # Find our call_id by matching the phone number
+    call_id = None
+    for cid, call in active_calls.items():
+        # Match by phone number (last 10 digits)
+        call_phone = call.get("to_number", "").replace("+91", "").replace("+", "")[-10:]
+        caller_phone = caller.replace("+91", "").replace("+", "")[-10:]
+        if call_phone == caller_phone and call.get("state") == CallState.GREETING:
+            call_id = cid
+            exotel_to_local[exotel_sid] = call_id
+            break
+    
+    if not call_id:
+        # No matching call found, just play default Hindi greeting
+        return Response(content=generate_exoml_play_hangup("hi-IN/01_greeting.wav"), media_type="application/xml")
+    
+    call = active_calls[call_id]
+    lang = call.get("language", "hi-IN")
+    
+    await add_transcript(call_id, "Agent", f"Greeting - {RO_NAMES.get(lang, 'RO')} tomorrow")
+    
+    exoml = generate_exoml_play_gather(f"{lang}/01_greeting.wav", call_id, "availability")
+    call["state"] = CallState.WAIT_AVAILABILITY
+    return Response(content=exoml, media_type="application/xml")
+
+
 @app.post("/exotel/callback/{call_id}")
 async def exotel_callback(call_id: str):
     if call_id not in active_calls:
@@ -485,21 +527,7 @@ async def index():
         <div class="max-w-7xl mx-auto flex items-center justify-between">
             <div class="flex items-center gap-3">
                 <!-- Acquink Logo -->
-                <svg class="acquink-logo" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M20 25 L20 75 Q20 85 30 85 L50 85" stroke="url(#grad1)" stroke-width="12" stroke-linecap="round" fill="none"/>
-                    <path d="M80 15 L80 65 Q80 75 70 75 L45 75" stroke="url(#grad2)" stroke-width="12" stroke-linecap="round" fill="none"/>
-                    <circle cx="80" cy="85" r="8" fill="#3b82f6"/>
-                    <defs>
-                        <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" style="stop-color:#8b5cf6"/>
-                            <stop offset="100%" style="stop-color:#3b82f6"/>
-                        </linearGradient>
-                        <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" style="stop-color:#f97316"/>
-                            <stop offset="100%" style="stop-color:#8b5cf6"/>
-                        </linearGradient>
-                    </defs>
-                </svg>
+                <img src="/logo.png" alt="Acquink" style="height: 40px; width: auto;">
                 <div>
                     <h1 class="text-xl font-semibold gradient-text">Smaartbrand Voice</h1>
                     <p class="text-xs text-gray-500">Pre-Collection Intelligence</p>
@@ -681,22 +709,8 @@ async def index():
     <footer class="mt-auto px-6 py-4 border-t border-white/10">
         <div class="max-w-7xl mx-auto flex items-center justify-between">
             <div class="flex items-center gap-3">
-                <svg class="w-6 h-6" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M20 25 L20 75 Q20 85 30 85 L50 85" stroke="url(#grad1f)" stroke-width="12" stroke-linecap="round" fill="none"/>
-                    <path d="M80 15 L80 65 Q80 75 70 75 L45 75" stroke="url(#grad2f)" stroke-width="12" stroke-linecap="round" fill="none"/>
-                    <circle cx="80" cy="85" r="8" fill="#3b82f6"/>
-                    <defs>
-                        <linearGradient id="grad1f" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" style="stop-color:#8b5cf6"/>
-                            <stop offset="100%" style="stop-color:#3b82f6"/>
-                        </linearGradient>
-                        <linearGradient id="grad2f" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" style="stop-color:#f97316"/>
-                            <stop offset="100%" style="stop-color:#8b5cf6"/>
-                        </linearGradient>
-                    </defs>
-                </svg>
-                <span class="text-sm text-gray-500">© 2026 Acquink Technologies</span>
+                <img src="/logo.png" alt="Acquink" style="height: 24px; width: auto;">
+                <span class="text-sm text-gray-500">© 2026 Acquink</span>
             </div>
             <div class="text-sm text-gray-500">
                 Powered by <span class="text-purple-400 font-medium">MASI</span> Technology

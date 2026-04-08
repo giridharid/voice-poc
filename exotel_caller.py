@@ -332,28 +332,39 @@ async def exotel_passthru_callback(request: Request):
     
     # Exotel sends GET with query parameters
     exotel_sid = request.query_params.get("CallSid", "")
-    caller = request.query_params.get("From", "")
+    # For outbound calls: From=ExoPhone, To=Borrower
+    # For inbound calls: From=Caller, To=ExoPhone
+    caller_from = request.query_params.get("From", "")
+    caller_to = request.query_params.get("To", "")
     
     # If POST, also check form data
     if request.method == "POST":
         form = await request.form()
         exotel_sid = exotel_sid or form.get("CallSid", "")
-        caller = caller or form.get("From", "")
+        caller_from = caller_from or form.get("From", "")
+        caller_to = caller_to or form.get("To", "")
     
     print(f"=== Exotel Callback ===")
     print(f"Method: {request.method}")
     print(f"CallSid: {exotel_sid}")
-    print(f"From: {caller}")
+    print(f"From: {caller_from}")
+    print(f"To: {caller_to}")
     print(f"All params: {dict(request.query_params)}")
+    print(f"Active calls: {list(active_calls.keys())}")
     
-    # Find our call_id by matching the phone number
+    # Find our call_id by matching the phone number (use To for outbound calls)
     call_id = None
     for cid, call in active_calls.items():
         # Match by phone number (last 10 digits)
         call_phone = call.get("to_number", "").replace("+91", "").replace("+", "")[-10:]
-        caller_phone = caller.replace("+91", "").replace("+", "")[-10:]
-        print(f"Comparing: call_phone={call_phone}, caller_phone={caller_phone}, state={call.get('state')}")
-        if call_phone == caller_phone and call.get("state") == CallState.GREETING:
+        # Try matching To field (borrower number for outbound)
+        to_phone = caller_to.replace("+91", "").replace("+", "")[-10:]
+        from_phone = caller_from.replace("+91", "").replace("+", "")[-10:]
+        
+        print(f"Comparing: call_phone={call_phone}, to_phone={to_phone}, from_phone={from_phone}, state={call.get('state')}")
+        
+        # Match on To (for outbound) or From (for inbound)
+        if (call_phone == to_phone or call_phone == from_phone) and call.get("state") == CallState.GREETING:
             call_id = cid
             exotel_to_local[exotel_sid] = call_id
             print(f"Match found: {call_id}")
@@ -1034,7 +1045,13 @@ async def index():
         // Chat toggle
         function toggleChat() {
             const panel = document.getElementById('chatPanel');
+            const isOpening = panel.classList.contains('translate-x-full');
             panel.classList.toggle('translate-x-full');
+            
+            // Load intel data when opening chat
+            if (isOpening && !intelData) {
+                loadIntelligence();
+            }
         }
         
         // Chat response (mock AI)
@@ -1107,6 +1124,7 @@ async def index():
         
         connectWS();
         loadConfig();
+        loadIntelligence(); // Preload for chat
     </script>
 </body>
 </html>

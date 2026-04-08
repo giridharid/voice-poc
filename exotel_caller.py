@@ -111,10 +111,10 @@ RO_NAMES = {
 def generate_mock_intelligence():
     clusters = [
         {"name": "Warangal Rural", "state": "Telangana"},
-        {"name": "Guntur District", "state": "Andhra Pradesh"},
-        {"name": "Dharwad", "state": "Karnataka"},
-        {"name": "Salem", "state": "Tamil Nadu"},
-        {"name": "Nashik Rural", "state": "Maharashtra"},
+        {"name": "Shad Nagar", "state": "Telangana"},
+        {"name": "Karimnagar", "state": "Telangana"},
+        {"name": "Nizamabad", "state": "Telangana"},
+        {"name": "Medak", "state": "Telangana"},
     ]
     
     borrowers = []
@@ -230,8 +230,8 @@ async def make_exotel_call(to_number: str, language: str = "hi-IN") -> dict:
     }
     
     url = f"https://{CONFIG['EXOTEL_SUBDOMAIN']}/v1/Accounts/{CONFIG['EXOTEL_ACCOUNT_SID']}/Calls/connect.json"
-    callback_url = f"{APP_BASE_URL}/exotel/callback/{call_id}"
     
+    # Don't pass Url - let the Flow assigned to ExoPhone handle callback via Passthru
     async with httpx.AsyncClient() as client:
         response = await client.post(
             url,
@@ -239,15 +239,17 @@ async def make_exotel_call(to_number: str, language: str = "hi-IN") -> dict:
             data={
                 "From": to_number,
                 "CallerId": caller_id,
-                "Url": callback_url,
                 "CallType": "trans",
             },
             timeout=30.0
         )
         
+        print(f"Exotel API Response: {response.status_code} - {response.text[:500]}")
+        
         if response.status_code in [200, 201]:
             result = response.json()
             active_calls[call_id]["exotel_sid"] = result.get("Call", {}).get("Sid")
+            print(f"Call initiated: {call_id}, Exotel SID: {active_calls[call_id]['exotel_sid']}")
             return {"success": True, "call_id": call_id}
         else:
             del active_calls[call_id]
@@ -916,31 +918,49 @@ async def index():
             box.scrollTop = box.scrollHeight;
         }
         
+        let isCallInProgress = false;
+        
         async function makeCall() {
+            if (isCallInProgress) {
+                console.log('Call already in progress, ignoring');
+                return;
+            }
+            
             const phone = document.getElementById('phone').value;
             if (!phone) { alert('Enter phone number'); return; }
             
+            isCallInProgress = true;
             const btn = document.getElementById('callBtn');
             btn.disabled = true;
             btn.textContent = '📞 Calling...';
+            btn.style.opacity = '0.5';
             document.getElementById('callStatus').textContent = 'Initiating...';
             document.getElementById('transcript').innerHTML = '<div class="text-center text-gray-500 py-10">Connecting...</div>';
             
-            const resp = await fetch('/api/call', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ phone, language: selectedLang })
-            });
-            const result = await resp.json();
-            
-            if (result.success) {
-                document.getElementById('callStatus').textContent = `Call ID: ${result.call_id}`;
-            } else {
-                document.getElementById('callStatus').textContent = `Error: ${result.error}`;
+            try {
+                const resp = await fetch('/api/call', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phone, language: selectedLang })
+                });
+                const result = await resp.json();
+                
+                if (result.success) {
+                    document.getElementById('callStatus').textContent = `Call ID: ${result.call_id}`;
+                } else {
+                    document.getElementById('callStatus').textContent = `Error: ${result.error}`;
+                }
+            } catch (err) {
+                document.getElementById('callStatus').textContent = `Error: ${err.message}`;
             }
             
-            btn.disabled = false;
-            btn.textContent = '📞 Call Now';
+            // Re-enable after 3 seconds to prevent rapid re-clicks
+            setTimeout(() => {
+                isCallInProgress = false;
+                btn.disabled = false;
+                btn.textContent = '📞 Call Now';
+                btn.style.opacity = '1';
+            }, 3000);
         }
         
         async function loadConfig() {
@@ -1137,21 +1157,52 @@ async def index():
                     `• <em>Collections Head:</em> Focus on 47 frequent decliners with financial stress<br>` +
                     `• <em>Field Ops:</em> Warangal and Karimnagar need additional RO support<br>` +
                     `• <em>Risk:</em> Weekly tracking of predicted-to-actual NPA conversion`;
-            } else if (ql.includes('ro') || ql.includes('centre') || ql.includes('center') || ql.includes('affected') || ql.includes('branch')) {
-                const sorted = Object.entries(intelData.clusters).sort((a,b) => b[1].avg_risk - a[1].avg_risk);
-                const worst = sorted[0];
-                const best = sorted[sorted.length-1];
-                response = `<strong>🏢 Centre Performance Analysis:</strong><br><br>` +
-                    `<strong class="text-red-400">⬇️ Needs Attention:</strong><br>` +
-                    `• <strong>${worst[0]}</strong> (${worst[1].state})<br>` +
-                    `&nbsp;&nbsp;Risk: ${worst[1].avg_risk} | Decliners: ${worst[1].frequent} | Stress: ${worst[1].financial_stress}<br><br>` +
-                    `<strong class="text-green-400">⬆️ Top Performer:</strong><br>` +
-                    `• <strong>${best[0]}</strong> (${best[1].state})<br>` +
-                    `&nbsp;&nbsp;Risk: ${best[1].avg_risk} | Decliners: ${best[1].frequent}<br><br>` +
-                    `<strong>📋 Actions for ${worst[0]}:</strong><br>` +
-                    `• <em>HR:</em> Review RO workload — may need additional staff<br>` +
-                    `• <em>Training:</em> Send senior RO for 2-day support visit<br>` +
-                    `• <em>Collections:</em> Joint visits for high-risk borrowers`;
+            } else if (ql.includes('ro') || ql.includes('centre') || ql.includes('center') || ql.includes('affected') || ql.includes('branch') || ql.includes('shad') || ql.includes('warangal') || ql.includes('karimnagar') || ql.includes('nizamabad') || ql.includes('medak')) {
+                // Check if asking about specific centre
+                let specificCentre = null;
+                const centreNames = Object.keys(intelData.clusters);
+                for (const name of centreNames) {
+                    if (ql.includes(name.toLowerCase().split(' ')[0])) {
+                        specificCentre = [name, intelData.clusters[name]];
+                        break;
+                    }
+                }
+                
+                if (specificCentre) {
+                    const [name, c] = specificCentre;
+                    const alertColor = c.alert === 'HIGH' ? 'text-red-400' : c.alert === 'MEDIUM' ? 'text-yellow-400' : 'text-green-400';
+                    response = `<strong>🏢 ${name} Centre Insights:</strong><br><br>` +
+                        `<strong>Status:</strong> <span class="${alertColor}">${c.alert} ALERT</span><br>` +
+                        `<strong>State:</strong> ${c.state}<br>` +
+                        `<strong>Total Borrowers:</strong> ${c.total}<br>` +
+                        `<strong>Average Risk Score:</strong> ${c.avg_risk}<br>` +
+                        `<strong>Frequent Decliners:</strong> ${c.frequent}<br>` +
+                        `<strong>Financial Stress Cases:</strong> ${c.financial_stress}<br><br>` +
+                        `<strong>📊 Key Patterns:</strong><br>` +
+                        `• Peak decline reason: Financial stress (${Math.round(c.financial_stress/c.total*100)}%)<br>` +
+                        `• ${c.frequent} borrowers declined 3+ times<br>` +
+                        `• Avg collection efficiency: ${100 - c.avg_risk}%<br><br>` +
+                        `<strong>📋 Actions for ${name}:</strong><br>` +
+                        `• <em>Branch Manager:</em> Personal review of top 5 decliners this week<br>` +
+                        `• <em>Collections:</em> Restructuring offers for ${c.financial_stress} financial stress cases<br>` +
+                        `• <em>Field Ops:</em> ${c.alert === 'HIGH' ? 'Deploy senior RO for support' : 'Continue normal monitoring'}<br>` +
+                        `• <em>Risk:</em> ${c.alert === 'HIGH' ? 'Weekly review' : 'Monthly review'} of this portfolio`;
+                } else {
+                    const sorted = Object.entries(intelData.clusters).sort((a,b) => b[1].avg_risk - a[1].avg_risk);
+                    const worst = sorted[0];
+                    const best = sorted[sorted.length-1];
+                    response = `<strong>🏢 Centre Performance Analysis:</strong><br><br>` +
+                        `<strong class="text-red-400">⬇️ Needs Attention:</strong><br>` +
+                        `• <strong>${worst[0]}</strong> (${worst[1].state})<br>` +
+                        `&nbsp;&nbsp;Risk: ${worst[1].avg_risk} | Decliners: ${worst[1].frequent} | Stress: ${worst[1].financial_stress}<br><br>` +
+                        `<strong class="text-green-400">⬆️ Top Performer:</strong><br>` +
+                        `• <strong>${best[0]}</strong> (${best[1].state})<br>` +
+                        `&nbsp;&nbsp;Risk: ${best[1].avg_risk} | Decliners: ${best[1].frequent}<br><br>` +
+                        `<strong>💡 Ask about specific centre:</strong><br>` +
+                        `• "Shad Nagar centre insights"<br>` +
+                        `• "Warangal Rural performance"<br>` +
+                        `• "Karimnagar analysis"`;
+                }
             } else if (ql.includes('action') || ql.includes('what should') || ql.includes('recommend') || ql.includes('priority')) {
                 response = `<strong>🎯 Today's Priority Actions by Department:</strong><br><br>` +
                     `<strong>Collections Team:</strong><br>` +

@@ -310,6 +310,16 @@ async def add_transcript(call_id: str, speaker: str, text: str, dtmf: str = None
 
 app = FastAPI(title="Fusion Finance Voice Intelligence")
 
+@app.middleware("http")
+async def log_all_requests(request: Request, call_next):
+    """Log every incoming request for debugging"""
+    print(f">>> INCOMING: {request.method} {request.url.path}")
+    print(f">>> Query: {dict(request.query_params)}")
+    print(f">>> Headers: {dict(request.headers)}")
+    response = await call_next(request)
+    print(f"<<< RESPONSE: {response.status_code}")
+    return response
+
 @app.on_event("startup")
 async def startup():
     global APP_BASE_URL
@@ -343,16 +353,24 @@ async def exotel_status_callback(call_id: str, request: Request):
     """Log call status updates from Exotel"""
     all_params = dict(request.query_params)
     
+    # Try to read raw body
+    try:
+        body = await request.body()
+        print(f"=== STATUS CALLBACK for {call_id} ===")
+        print(f"Method: {request.method}")
+        print(f"Raw Body: {body}")
+        print(f"Query Params: {all_params}")
+    except Exception as e:
+        print(f"Error reading body: {e}")
+    
     if request.method == "POST":
         try:
             form = await request.form()
             all_params.update(dict(form))
-        except:
-            pass
+            print(f"Form Params: {dict(form)}")
+        except Exception as e:
+            print(f"Error reading form: {e}")
     
-    print(f"=== STATUS CALLBACK for {call_id} ===")
-    print(f"Method: {request.method}")
-    print(f"All Params: {all_params}")
     print(f"Status: {all_params.get('Status', 'unknown')}")
     print(f"CallSid: {all_params.get('CallSid', 'unknown')}")
     

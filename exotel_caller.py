@@ -316,9 +316,9 @@ async def serve_audio(language: str, filename: str):
         raise HTTPException(status_code=404, detail="Audio not found")
     return Response(content=audio_path.read_bytes(), media_type="audio/wav")
 
-@app.get("/logo.png")
+@app.get("/acquink_logo.png")
 async def serve_logo():
-    logo_path = Path(__file__).parent / "logo.png"
+    logo_path = Path(__file__).parent / "acquink_logo.png"
     if not logo_path.exists():
         raise HTTPException(status_code=404, detail="Logo not found")
     return Response(content=logo_path.read_bytes(), media_type="image/png")
@@ -539,7 +539,7 @@ async def index():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smaartbrand Voice | Fusion Finance</title>
-    <link rel="icon" type="image/png" href="/logo.png">
+    <link rel="icon" type="image/png" href="/acquink_logo.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
@@ -586,7 +586,7 @@ async def index():
         <div class="max-w-7xl mx-auto flex items-center justify-between">
             <div class="flex items-center gap-3">
                 <!-- Acquink Logo -->
-                <img src="/logo.png" alt="Acquink" style="height: 40px; width: auto;">
+                <img src="/acquink_logo.png" alt="Acquink" style="height: 40px; width: auto;">
                 <div>
                     <h1 class="text-xl font-semibold gradient-text">Smaartbrand Voice</h1>
                     <p class="text-xs text-gray-500">Pre-Collection Intelligence</p>
@@ -808,7 +808,7 @@ async def index():
     <footer class="mt-auto px-6 py-4 border-t border-white/10">
         <div class="max-w-7xl mx-auto flex items-center justify-between">
             <div class="flex items-center gap-3">
-                <img src="/logo.png" alt="Acquink" style="height: 24px; width: auto;">
+                <img src="/acquink_logo.png" alt="Acquink" style="height: 24px; width: auto;">
                 <span class="text-sm text-gray-500">© 2026 Acquink</span>
             </div>
             <div class="text-sm text-gray-500">

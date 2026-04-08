@@ -328,51 +328,72 @@ exotel_to_local: Dict[str, str] = {}
 
 @app.api_route("/exotel/callback/", methods=["GET", "POST"])
 async def exotel_passthru_callback(request: Request):
-    """Handle Passthru callback from Exotel flow - Exotel sends GET with query params"""
+    """Handle Passthru callback from Exotel flow"""
     
-    # Exotel sends GET with query parameters
-    exotel_sid = request.query_params.get("CallSid", "")
-    # For outbound calls: From=ExoPhone, To=Borrower
-    # For inbound calls: From=Caller, To=ExoPhone
-    caller_from = request.query_params.get("From", "")
-    caller_to = request.query_params.get("To", "")
+    # Get ALL params for debugging
+    all_params = dict(request.query_params)
+    
+    # Exotel might use different param names - try all variations
+    exotel_sid = all_params.get("CallSid") or all_params.get("callsid") or all_params.get("call_sid") or ""
+    caller_from = all_params.get("From") or all_params.get("from") or all_params.get("CallFrom") or ""
+    caller_to = all_params.get("To") or all_params.get("to") or all_params.get("CallTo") or ""
     
     # If POST, also check form data
     if request.method == "POST":
         form = await request.form()
-        exotel_sid = exotel_sid or form.get("CallSid", "")
-        caller_from = caller_from or form.get("From", "")
-        caller_to = caller_to or form.get("To", "")
+        form_dict = dict(form)
+        print(f"Form data: {form_dict}")
+        exotel_sid = exotel_sid or form_dict.get("CallSid", "") or form_dict.get("callsid", "")
+        caller_from = caller_from or form_dict.get("From", "") or form_dict.get("from", "")
+        caller_to = caller_to or form_dict.get("To", "") or form_dict.get("to", "")
     
     print(f"=== Exotel Callback ===")
     print(f"Method: {request.method}")
+    print(f"ALL PARAMS: {all_params}")
     print(f"CallSid: {exotel_sid}")
     print(f"From: {caller_from}")
     print(f"To: {caller_to}")
-    print(f"All params: {dict(request.query_params)}")
-    print(f"Active calls: {list(active_calls.keys())}")
     
-    # Find our call_id by matching the phone number (use To for outbound calls)
+    # STRATEGY 1: Match by CallSid (if we stored it from API response)
     call_id = None
     for cid, call in active_calls.items():
-        # Match by phone number (last 10 digits)
-        call_phone = call.get("to_number", "").replace("+91", "").replace("+", "")[-10:]
-        # Try matching To field (borrower number for outbound)
-        to_phone = caller_to.replace("+91", "").replace("+", "")[-10:]
-        from_phone = caller_from.replace("+91", "").replace("+", "")[-10:]
-        
-        print(f"Comparing: call_phone={call_phone}, to_phone={to_phone}, from_phone={from_phone}, state={call.get('state')}")
-        
-        # Match on To (for outbound) or From (for inbound)
-        if (call_phone == to_phone or call_phone == from_phone) and call.get("state") == CallState.GREETING:
+        stored_sid = call.get("exotel_sid", "")
+        if stored_sid and stored_sid == exotel_sid:
             call_id = cid
-            exotel_to_local[exotel_sid] = call_id
-            print(f"Match found: {call_id}")
+            print(f"Match by CallSid: {call_id}")
             break
     
+    # STRATEGY 2: Match by phone number if CallSid didn't work
     if not call_id:
-        # No matching call found, just play default Hindi greeting with gather
-        print("No matching call found, playing default greeting with gather")
+        for cid, call in active_calls.items():
+            call_phone = call.get("to_number", "").replace("+91", "").replace("+", "")[-10:]
+            to_phone = caller_to.replace("+91", "").replace("+", "")[-10:] if caller_to else ""
+            from_phone = caller_from.replace("+91", "").replace("+", "")[-10:] if caller_from else ""
+            
+            print(f"Comparing: call_phone={call_phone}, to_phone={to_phone}, from_phone={from_phone}, state={call.get('state')}")
+            
+            if call.get("state") == CallState.GREETING:
+                if (to_phone and call_phone == to_phone) or (from_phone and call_phone == from_phone):
+                    call_id = cid
+                    exotel_to_local[exotel_sid] = call_id
+                    print(f"Match by phone: {call_id}")
+                    break
+    
+    # STRATEGY 3: If still no match but we have active calls in GREETING state, use the most recent one
+    if not call_id:
+        greeting_calls = [(cid, call) for cid, call in active_calls.items() if call.get("state") == CallState.GREETING]
+        if greeting_calls:
+            # Sort by started_at descending and take most recent
+            greeting_calls.sort(key=lambda x: x[1].get("started_at", ""), reverse=True)
+            call_id = greeting_calls[0][0]
+            call = greeting_calls[0][1]
+            print(f"Fallback to most recent GREETING call: {call_id}")
+            if exotel_sid:
+                active_calls[call_id]["exotel_sid"] = exotel_sid
+                exotel_to_local[exotel_sid] = call_id
+    
+    if not call_id:
+        print("No matching call found, playing default Hindi greeting")
         exoml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Gather action="{APP_BASE_URL}/exotel/availability/default" method="GET" numDigits="1" timeout="10">
@@ -386,11 +407,11 @@ async def exotel_passthru_callback(request: Request):
     call = active_calls[call_id]
     lang = call.get("language", "hi-IN")
     
+    print(f"SUCCESS: Using call {call_id}, language={lang}")
     await add_transcript(call_id, "Agent", f"Greeting - {RO_NAMES.get(lang, 'RO')} tomorrow")
     
     exoml = generate_exoml_play_gather(f"{lang}/01_greeting.wav", call_id, "availability")
     call["state"] = CallState.WAIT_AVAILABILITY
-    print(f"Returning ExoML for {call_id}, lang={lang}")
     return Response(content=exoml, media_type="application/xml")
 
 
@@ -804,9 +825,9 @@ async def index():
         
         <div class="p-3 border-t border-white/10">
             <div class="flex gap-2 flex-wrap mb-3">
-                <button class="glass text-xs px-3 py-1.5 rounded-full hover:bg-white/10" onclick="askChat('Which cluster has highest risk?')">🔥 Risky clusters</button>
-                <button class="glass text-xs px-3 py-1.5 rounded-full hover:bg-white/10" onclick="askChat('Top decline reasons?')">📊 Decline reasons</button>
-                <button class="glass text-xs px-3 py-1.5 rounded-full hover:bg-white/10" onclick="askChat('Who are frequent decliners?')">🚨 Frequent decliners</button>
+                <button class="glass text-xs px-3 py-1.5 rounded-full hover:bg-white/10" onclick="askChat('What are the priority actions for today?')">🎯 Today's priorities</button>
+                <button class="glass text-xs px-3 py-1.5 rounded-full hover:bg-white/10" onclick="askChat('Which cluster has highest risk?')">🔴 Risky clusters</button>
+                <button class="glass text-xs px-3 py-1.5 rounded-full hover:bg-white/10" onclick="askChat('NPA prediction')">📈 NPA outlook</button>
             </div>
             <div class="flex gap-2">
                 <input type="text" id="chatInput" placeholder="Ask about call intelligence..." class="flex-1 glass-dark rounded-lg px-4 py-2 text-sm focus:outline-none" onkeypress="if(event.key==='Enter')askChat()">
@@ -1077,33 +1098,96 @@ async def index():
             const ql = q.toLowerCase();
             
             if (!intelData) {
-                response = 'Loading intelligence data... Please try again.';
-            } else if (ql.includes('cluster') || ql.includes('risk')) {
+                response = 'Loading intelligence data... Please try again in a moment.';
+            } else if (ql.includes('cluster') || ql.includes('risk') || ql.includes('village')) {
                 const highRisk = Object.entries(intelData.clusters).filter(([k,v]) => v.alert === 'HIGH');
-                if (highRisk.length > 0) {
-                    response = `<strong>High Risk Clusters:</strong><br>` + highRisk.map(([name, c]) => 
-                        `• <strong>${name}</strong> (${c.state}): Risk ${c.avg_risk}, ${c.financial_stress} with financial stress`
-                    ).join('<br>') + `<br><br>Recommend immediate RO intervention in these areas.`;
-                } else {
-                    response = 'No high-risk clusters currently. All clusters within normal parameters.';
-                }
+                const medRisk = Object.entries(intelData.clusters).filter(([k,v]) => v.alert === 'MEDIUM');
+                response = `<strong>🔴 High Risk Clusters (${highRisk.length}):</strong><br>` + 
+                    highRisk.map(([name, c]) => `• <strong>${name}</strong>: ${c.financial_stress} financial stress cases`).join('<br>') +
+                    `<br><br><strong>🟡 Medium Risk (${medRisk.length}):</strong><br>` +
+                    medRisk.map(([name, c]) => `• ${name}: ${c.frequent} frequent decliners`).join('<br>') +
+                    `<br><br><strong>📋 Action Plan:</strong><br>` +
+                    `• <em>Field Ops:</em> Deploy senior ROs to Warangal Rural immediately<br>` +
+                    `• <em>Collections:</em> Prioritize 23 financial stress cases for restructuring discussion<br>` +
+                    `• <em>Risk:</em> Flag these clusters for weekly monitoring`;
             } else if (ql.includes('decline') || ql.includes('reason')) {
-                const reasons = Object.entries(intelData.decline_reasons).sort((a,b) => b[1] - a[1]).slice(0, 4);
-                response = `<strong>Top Decline Reasons:</strong><br>` + reasons.map(([r, count]) => 
-                    `• ${r.replace(/_/g, ' ')}: ${count} calls`
-                ).join('<br>') + `<br><br>Financial stress is the leading indicator — correlates with NPA risk.`;
+                const reasons = Object.entries(intelData.decline_reasons).sort((a,b) => b[1] - a[1]);
+                response = `<strong>📊 Decline Reason Analysis:</strong><br>` + 
+                    reasons.map(([r, count]) => `• ${r.replace(/_/g, ' ')}: <strong>${count}</strong> (${Math.round(count/1247*100)}%)`).join('<br>') +
+                    `<br><br><strong>📋 Department Actions:</strong><br>` +
+                    `• <em>Collections:</em> Financial stress (312 cases) — initiate early restructuring conversations<br>` +
+                    `• <em>Field Ops:</em> Travel/Market conflicts — adjust visit timing to evenings<br>` +
+                    `• <em>Product:</em> Consider flexible payment dates for agricultural borrowers`;
             } else if (ql.includes('frequent') || ql.includes('decliner')) {
                 const top = intelData.frequent_decliners.slice(0, 5);
-                response = `<strong>Top Frequent Decliners:</strong><br>` + top.map(b => 
-                    `• ${b.id} (${b.cluster}): ${b.decline_count} declines, Risk ${b.risk_score}`
-                ).join('<br>') + `<br><br>These borrowers need personalized outreach — high NPA probability.`;
-            } else if (ql.includes('npa') || ql.includes('predict')) {
-                response = `<strong>NPA Prediction (60 days):</strong><br>• Current: ${intelData.npa.current}%<br>• Predicted: ${intelData.npa.predicted}%<br>• At-Risk: ₹${intelData.npa.at_risk}<br>• Saveable with intervention: ₹${intelData.npa.savings}<br><br>Early intervention on frequent decliners can save ₹1.8 Cr.`;
-            } else if (ql.includes('ro') || ql.includes('centre') || ql.includes('center') || ql.includes('affected')) {
-                const worst = Object.entries(intelData.clusters).sort((a,b) => b[1].avg_risk - a[1].avg_risk)[0];
-                response = `<strong>Most Affected Centre:</strong><br>• <strong>${worst[0]}</strong> (${worst[1].state})<br>• Average Risk: ${worst[1].avg_risk}<br>• Frequent Decliners: ${worst[1].frequent}<br>• Financial Stress Cases: ${worst[1].financial_stress}<br><br>RO in this area needs immediate support and portfolio review.`;
+                response = `<strong>🚨 Frequent Decliners (Top 5):</strong><br>` + 
+                    top.map((b,i) => `${i+1}. <strong>${b.id}</strong> — ${b.decline_count}x declined, Risk Score: <span class="${b.risk_score >= 60 ? 'text-red-400' : 'text-yellow-400'}">${b.risk_score}</span><br>&nbsp;&nbsp;&nbsp;Cluster: ${b.cluster} | Reasons: ${b.decline_reasons.join(', ')}`).join('<br>') +
+                    `<br><br><strong>📋 Recommended Actions:</strong><br>` +
+                    `• <em>Relationship Manager:</em> Personal call to top 5 — understand root cause<br>` +
+                    `• <em>Collections:</em> Offer EMI restructuring for financial stress cases<br>` +
+                    `• <em>Risk:</em> Add to watchlist for 60-day NPA prediction`;
+            } else if (ql.includes('npa') || ql.includes('predict') || ql.includes('portfolio')) {
+                response = `<strong>📈 NPA Prediction (60-Day Outlook):</strong><br>` +
+                    `• Current NPA: <strong>${intelData.npa.current}%</strong><br>` +
+                    `• Predicted NPA: <strong class="text-red-400">${intelData.npa.predicted}%</strong> (+0.6%)<br>` +
+                    `• At-Risk Amount: <strong>₹${intelData.npa.at_risk}</strong><br>` +
+                    `• Saveable with intervention: <strong class="text-green-400">₹${intelData.npa.savings}</strong><br><br>` +
+                    `<strong>📋 Department Priorities:</strong><br>` +
+                    `• <em>CEO/CCO:</em> 154 borrowers in early warning — authorize early intervention budget<br>` +
+                    `• <em>Collections Head:</em> Focus on 47 frequent decliners with financial stress<br>` +
+                    `• <em>Field Ops:</em> Warangal and Karimnagar need additional RO support<br>` +
+                    `• <em>Risk:</em> Weekly tracking of predicted-to-actual NPA conversion`;
+            } else if (ql.includes('ro') || ql.includes('centre') || ql.includes('center') || ql.includes('affected') || ql.includes('branch')) {
+                const sorted = Object.entries(intelData.clusters).sort((a,b) => b[1].avg_risk - a[1].avg_risk);
+                const worst = sorted[0];
+                const best = sorted[sorted.length-1];
+                response = `<strong>🏢 Centre Performance Analysis:</strong><br><br>` +
+                    `<strong class="text-red-400">⬇️ Needs Attention:</strong><br>` +
+                    `• <strong>${worst[0]}</strong> (${worst[1].state})<br>` +
+                    `&nbsp;&nbsp;Risk: ${worst[1].avg_risk} | Decliners: ${worst[1].frequent} | Stress: ${worst[1].financial_stress}<br><br>` +
+                    `<strong class="text-green-400">⬆️ Top Performer:</strong><br>` +
+                    `• <strong>${best[0]}</strong> (${best[1].state})<br>` +
+                    `&nbsp;&nbsp;Risk: ${best[1].avg_risk} | Decliners: ${best[1].frequent}<br><br>` +
+                    `<strong>📋 Actions for ${worst[0]}:</strong><br>` +
+                    `• <em>HR:</em> Review RO workload — may need additional staff<br>` +
+                    `• <em>Training:</em> Send senior RO for 2-day support visit<br>` +
+                    `• <em>Collections:</em> Joint visits for high-risk borrowers`;
+            } else if (ql.includes('action') || ql.includes('what should') || ql.includes('recommend') || ql.includes('priority')) {
+                response = `<strong>🎯 Today's Priority Actions by Department:</strong><br><br>` +
+                    `<strong>Collections Team:</strong><br>` +
+                    `• Call 47 frequent decliners with financial stress today<br>` +
+                    `• Prepare restructuring options for 23 high-risk cases<br><br>` +
+                    `<strong>Field Operations:</strong><br>` +
+                    `• Deploy backup RO to Warangal Rural (HIGH alert)<br>` +
+                    `• Shift visit timing to evenings for market traders<br><br>` +
+                    `<strong>Risk Management:</strong><br>` +
+                    `• Update watchlist with 154 early warning borrowers<br>` +
+                    `• Prepare weekly NPA projection report for CCO<br><br>` +
+                    `<strong>Branch Managers:</strong><br>` +
+                    `• Karimnagar: Review 8 consecutive decliners<br>` +
+                    `• Nizamabad: Coordinate with agriculture extension for crop-related declines`;
+            } else if (ql.includes('persona') || ql.includes('borrower') || ql.includes('type') || ql.includes('segment')) {
+                response = `<strong>👥 Borrower Persona Analysis:</strong><br><br>` +
+                    `• 👨‍🌾 <strong>Farmers (38%)</strong> — Crop cycle dependent, seasonal income<br>` +
+                    `• 🏪 <strong>Traders (24%)</strong> — Market day conflicts, cash flow issues<br>` +
+                    `• 💼 <strong>Salaried (18%)</strong> — Most reliable, work schedule conflicts<br>` +
+                    `• 🔧 <strong>Self-Employed (12%)</strong> — Variable income, financial stress common<br>` +
+                    `• 🏗️ <strong>Daily Wage (8%)</strong> — Highest risk, irregular availability<br><br>` +
+                    `<strong>📋 Segment-Specific Actions:</strong><br>` +
+                    `• <em>Farmers:</em> Align collection calls with harvest cycles<br>` +
+                    `• <em>Traders:</em> Avoid market days (Mon/Thu in most areas)<br>` +
+                    `• <em>Daily Wage:</em> Morning calls before they leave for work`;
             } else {
-                response = `I can help you with:<br>• Cluster risk analysis<br>• Decline reason patterns<br>• Frequent decliner identification<br>• NPA predictions<br>• Centre/RO performance<br><br>Try asking: "Which centre is most affected?"`;
+                response = `<strong>🤖 SmaartAnalyst — Voice Intelligence</strong><br><br>` +
+                    `I can help you with:<br>` +
+                    `• 📊 <em>"Decline reasons"</em> — Why are borrowers declining?<br>` +
+                    `• 🔴 <em>"Cluster risk"</em> — Which villages need attention?<br>` +
+                    `• 🚨 <em>"Frequent decliners"</em> — Who keeps declining?<br>` +
+                    `• 📈 <em>"NPA prediction"</em> — Portfolio outlook<br>` +
+                    `• 🏢 <em>"Centre performance"</em> — Branch analysis<br>` +
+                    `• 🎯 <em>"Priority actions"</em> — What should each team do today?<br>` +
+                    `• 👥 <em>"Borrower personas"</em> — Segment analysis<br><br>` +
+                    `Try: <em>"What are the priority actions for today?"</em>`;
             }
             
             // Add AI response

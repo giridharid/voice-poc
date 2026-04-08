@@ -211,12 +211,11 @@ async def make_exotel_call(to_number: str, language: str = "hi-IN") -> dict:
     if not caller_id:
         return {"success": False, "error": "No caller ID configured"}
     
-    to_number = to_number.replace(" ", "").replace("-", "")
-    if not to_number.startswith("+"):
-        if to_number.startswith("0"):
-            to_number = "+91" + to_number[1:]
-        elif len(to_number) == 10:
-            to_number = "+91" + to_number
+    # Clean phone number - Exotel wants 10 digits for Indian numbers
+    to_number = to_number.replace(" ", "").replace("-", "").replace("+91", "").replace("+", "")
+    if to_number.startswith("0"):
+        to_number = to_number[1:]
+    # Now to_number should be 10 digits like 9849270361
     
     call_id = f"call_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{to_number[-4:]}"
     
@@ -229,22 +228,23 @@ async def make_exotel_call(to_number: str, language: str = "hi-IN") -> dict:
         "started_at": datetime.now().isoformat(),
     }
     
-    url = f"https://{CONFIG['EXOTEL_SUBDOMAIN']}/v1/Accounts/{CONFIG['EXOTEL_ACCOUNT_SID']}/Calls/connect.json"
+    api_url = f"https://{CONFIG['EXOTEL_SUBDOMAIN']}/v1/Accounts/{CONFIG['EXOTEL_ACCOUNT_SID']}/Calls/connect.json"
+    callback_url = f"{APP_BASE_URL}/exotel/callback/{call_id}"
     
     print(f"=== INITIATING CALL ===")
-    print(f"To Number: {to_number}")
+    print(f"To Number (10 digit): {to_number}")
     print(f"Caller ID: {caller_id}")
-    print(f"Using App ID: 1222663 (voice.flow Passthru)")
-    print(f"API URL: {url}")
+    print(f"Callback URL: {callback_url}")
+    print(f"API URL: {api_url}")
     
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            url,
+            api_url,
             auth=(CONFIG["EXOTEL_API_KEY"], CONFIG["EXOTEL_API_TOKEN"]),
             data={
                 "From": to_number,
                 "CallerId": caller_id,
-                "App": "1222663",
+                "Url": callback_url,
                 "CallType": "trans",
             },
             timeout=30.0
